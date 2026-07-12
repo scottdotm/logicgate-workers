@@ -1,0 +1,49 @@
+name = "logicgate-workers"
+main = "src/index.ts"
+compatibility_date = "2024-07-01"
+workers_dev = true
+preview_urls = true
+
+# Observability — logs and traces for debugging API requests, email webhooks, and errors
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
+# Custom domain route for api.scottdotm.com
+[[routes]]
+pattern = "api.scottdotm.com"
+zone_name = "scottdotm.com"
+custom_domain = true
+enabled = true
+previews_enabled = false
+
+# D1 database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "logicgate-db"
+database_id = "5418d4d7-f1b0-4828-aaf2-90a82c54119b"
+
+# R2 bucket binding (uncomment after creating the bucket in Cloudflare dashboard)
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "logicgate-uploads"
+
+[vars]
+ALLOWED_ORIGINS = "https://scottdotm.com,http://localhost:8788"
+
+# Required secrets (set via `wrangler secret put` in production):
+# RESEND_API_KEY  - API key for Resend transactional email
+# ADMIN_EMAIL     - Destination address for inquiry notifications
+# FROM_EMAIL      - Sender address (must be verified in Resend)
+# ADMIN_API_KEY   - Bearer token for /admin/inquiries endpoints
