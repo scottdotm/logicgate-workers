@@ -67,9 +67,13 @@ export function generateReportHtml(
       .image-meta span { color: #666; }
       .placeholder { background: #fafafa; border: 2px dashed #ccc; border-radius: 12px; padding: 2rem; text-align: center; color: #666; }
       .footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; font-size: 0.85rem; color: #666; }
+      .print-btn { position: fixed; top: 1rem; right: 1rem; background: #005f6b; color: #fff; border: none; border-radius: 8px; padding: 0.6rem 1.2rem; font-size: 0.9rem; cursor: pointer; }
+      .print-btn:hover { background: #007c8c; }
+      @media print { .print-btn { display: none; } body { padding: 0; } }
     </style>
   </head>
   <body>
+    <button class="print-btn" onclick="window.print()">Download PDF</button>
     <h1>LogicGate Lake Survey Report</h1>
 
     <div class="meta">

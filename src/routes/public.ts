@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Env } from '../index';
 import { demoReportHtml } from './demo-report';
 import { fetchInquiryAndUploads, generateReportHtml } from './lake-report';
+import { generateNdaaReportHtml } from './ndaa-report';
 
 export const publicRouter = new Hono<{ Bindings: Env }>();
 
@@ -370,8 +371,8 @@ publicRouter.get('/admin/uploads', async (c) => {
   return c.json({ success: true, uploads: result.results || [] });
 });
 
-publicRouter.get('/reports/:inquiryId', async (c) => {
-  const id = parseInt(c.req.param('inquiryId'), 10);
+async function serveLakeReport(c: Context<{ Bindings: Env }>) {
+  const id = parseInt(c.req.param('inquiryId') ?? '', 10);
   if (Number.isNaN(id)) {
     return c.json({ success: false, detail: 'Invalid inquiry ID' }, 400);
   }
@@ -384,7 +385,10 @@ publicRouter.get('/reports/:inquiryId', async (c) => {
   const url = new URL(c.req.url);
   const baseUrl = `${url.protocol}//${url.host}`;
   return c.html(generateReportHtml(inquiry, uploads, baseUrl));
-});
+}
+
+publicRouter.get('/reports/:inquiryId', serveLakeReport);
+publicRouter.get('/lake-report/:inquiryId', serveLakeReport);
 
 publicRouter.get('/demo-report', (c) => {
   return c.html(demoReportHtml);
@@ -407,11 +411,14 @@ const ndaaScanSchema = z.object({
   manifest: z.record(z.unknown()).optional(),
 });
 
-async function validateClientToken(env: Env, token: string): Promise<boolean> {
+async function getClientTokenRecord(
+  env: Env,
+  token: string
+): Promise<{ id: number; client_name: string; contact_email: string | null } | null> {
   const result = await env.DB.prepare(
-    'SELECT id FROM ndaa_client_tokens WHERE token = ? AND active = 1'
-  ).bind(token).first();
-  return !!result;
+    'SELECT id, client_name, contact_email FROM ndaa_client_tokens WHERE token = ? AND active = 1'
+  ).bind(token).first<{ id: number; client_name: string; contact_email: string | null }>();
+  return result || null;
 }
 
 publicRouter.post('/ndaa-scan', async (c) => {
@@ -422,8 +429,8 @@ publicRouter.post('/ndaa-scan', async (c) => {
     return c.json({ success: false, detail: 'Missing Authorization header. Use: Bearer <client_token>' }, 401);
   }
 
-  const valid = await validateClientToken(c.env, token);
-  if (!valid) {
+  const tokenRecord = await getClientTokenRecord(c.env, token);
+  if (!tokenRecord) {
     return c.json({ success: false, detail: 'Invalid or inactive client token' }, 403);
   }
 
@@ -510,10 +517,35 @@ publicRouter.post('/ndaa-scan', async (c) => {
         ${manifestSha256 ? `<tr><td><strong>Manifest SHA-256</strong></td><td>${escapeHtml(manifestSha256)}</td></tr>` : ''}
       </table>
       <p>Scan ID: ${scanId}</p>
-      <p><a href="https://scottdotm.com/api/v1/public/ndaa-scan/${scanId}">View scan details</a></p>
+      <p><a href="${new URL(c.req.url).origin}/api/v1/public/ndaa-scan/${scanId}/report?token=${encodeURIComponent(token)}">View HTML report</a></p>
     `;
 
     await sendEmail(c.env, adminEmail, `NDAA Scan uploaded: ${data.client_name || 'Unknown'} — ${flaggedText}`, adminHtml);
+
+    // Notify the client with a direct link to their signed report
+    if (tokenRecord.contact_email) {
+      const reportUrl = `${new URL(c.req.url).origin}/api/v1/public/ndaa-scan/${scanId}/report?token=${encodeURIComponent(token)}`;
+      const clientHtml = `
+        <p>Hi ${escapeHtml(tokenRecord.client_name)},</p>
+        <p>Your NDAA Section 889 compliance scan has been processed and your report is ready.</p>
+        <table>
+          <tr><td><strong>Scan date</strong></td><td>${escapeHtml(data.scan_date)}</td></tr>
+          <tr><td><strong>Devices scanned</strong></td><td>${data.total_devices}</td></tr>
+          <tr><td><strong>Result</strong></td><td>${escapeHtml(flaggedText)}</td></tr>
+          ${manifestSha256 ? `<tr><td><strong>Signed manifest SHA-256</strong></td><td>${escapeHtml(manifestSha256)}</td></tr>` : ''}
+        </table>
+        <p><a href="${reportUrl}">View your compliance report</a></p>
+        <p>This link is private to your organization. The report includes a print-to-PDF option and, where applicable, a cryptographically signed compliance manifest that any third party can verify independently.</p>
+        <p>Questions? Reply to this email or contact <a href="mailto:scott@scottdotm.com">scott@scottdotm.com</a>.</p>
+        <p>— Logic Gate IT NDAA Compliance Scanning</p>
+      `;
+      await sendEmail(
+        c.env,
+        tokenRecord.contact_email,
+        `Your NDAA compliance scan report is ready — ${flaggedText}`,
+        clientHtml
+      );
+    }
 
     return c.json({
       success: true,
@@ -576,6 +608,52 @@ publicRouter.get('/ndaa-scan/:id', async (c) => {
       manifest: manifest,
     }
   });
+});
+
+publicRouter.get('/ndaa-scan/:id/report', async (c) => {
+  const id = c.req.param('id');
+
+  // Allow access with admin key or client token, via header or ?token= (for email links)
+  const auth = c.req.header('Authorization');
+  const headerToken = auth?.startsWith('Bearer ') ? auth.slice(7) : null;
+  const token = headerToken || c.req.query('token') || null;
+
+  const result = await c.env.DB.prepare(
+    'SELECT * FROM ndaa_scans WHERE id = ? OR scan_uuid = ?'
+  ).bind(id, id).first();
+
+  if (!result) {
+    return c.json({ success: false, detail: 'Scan not found' }, 404);
+  }
+
+  const isAdmin = c.env.ADMIN_API_KEY && token === c.env.ADMIN_API_KEY;
+  const isClient = token && token === result.client_token;
+
+  if (!isAdmin && !isClient) {
+    return c.json({ success: false, detail: 'Unauthorized to view this scan' }, 403);
+  }
+
+  const scanReport = result.scan_report_json ? JSON.parse(result.scan_report_json as string) : null;
+
+  return c.html(generateNdaaReportHtml(
+    {
+      id: result.id as number,
+      scan_uuid: result.scan_uuid as string,
+      client_name: result.client_name as string | null,
+      scan_date: result.scan_date as string,
+      subnet_scanned: result.subnet_scanned as string,
+      scanner_version: result.scanner_version as string | null,
+      total_devices: result.total_devices as number,
+      devices_flagged: result.devices_flagged as number,
+      devices_clean: result.devices_clean as number,
+      discovery_only_devices: result.discovery_only_devices as number,
+      compliance_status: result.compliance_status as string,
+      manifest_sha256: result.manifest_sha256 as string | null,
+      manifest_fingerprint: result.manifest_fingerprint as string | null,
+      uploaded_at: result.uploaded_at as string,
+    },
+    scanReport
+  ));
 });
 
 publicRouter.get('/admin/ndaa-scans', async (c) => {

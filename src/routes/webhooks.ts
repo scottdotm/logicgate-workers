@@ -18,29 +18,96 @@ export const webhookRouter = new Hono<{ Bindings: Env }>();
  *   URL: https://api.scottdotm.com/api/v1/webhooks/resend
  *   Events: all
  *
- * Security: Resend signs webhooks with a signature in the
- * `Resend-Webhook-Signature` header. We verify it using the
- * RESEND_WEBHOOK_SECRET env var (HMAC-SHA256).
+ * Security: Resend uses Svix to sign webhooks. Required headers are
+ * `svix-id`, `svix-timestamp`, and `svix-signature`. We verify the
+ * HMAC-SHA256 signature using the RESEND_WEBHOOK_SECRET env var.
  *
  * If the secret is not configured, we log a warning and accept
  * the payload (useful for testing). In production, ALWAYS set
  * RESEND_WEBHOOK_SECRET.
  */
+function base64Decode(input: string): Uint8Array {
+  const binary = atob(input);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function verifySvixWebhook(
+  payload: string,
+  headers: { id?: string | undefined; timestamp?: string | undefined; signature?: string | undefined },
+  secret: string
+): Promise<boolean> {
+  if (!secret.startsWith('whsec_')) {
+    return false;
+  }
+  const timestamp = headers.timestamp;
+  const signature = headers.signature;
+  if (!timestamp || !signature) {
+    return false;
+  }
+
+  const keyBytes = base64Decode(secret.slice('whsec_'.length));
+  const key = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['verify']
+  );
+
+  const message = new TextEncoder().encode(`${timestamp}.${payload}`);
+  const signatures = signature.split(' ').filter(Boolean);
+
+  for (const sig of signatures) {
+    const [version, value] = sig.split(',');
+    if (version !== 'v1' || !value) {
+      continue;
+    }
+    const sigBytes = base64Decode(value);
+    const valid = await crypto.subtle.verify(
+      { name: 'HMAC', hash: 'SHA-256' },
+      key,
+      sigBytes,
+      message
+    );
+    if (valid) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 webhookRouter.post('/resend', async (c) => {
   const env = c.env as Env;
 
   // --- Signature verification ---
-  const signature = c.req.header('Resend-Webhook-Signature') || '';
-  const secret = (env as any).RESEND_WEBHOOK_SECRET as string | undefined;
+  // Resend uses Svix to sign webhooks. Required headers:
+  //   svix-id, svix-timestamp, svix-signature
+  // The secret is the value shown in the Resend dashboard (starts with whsec_).
+  const secret = env.RESEND_WEBHOOK_SECRET;
+  const rawPayload = await c.req.text();
 
   if (!secret) {
     console.warn('RESEND_WEBHOOK_SECRET not configured — accepting webhook without signature verification');
+  } else {
+    const verified = await verifySvixWebhook(rawPayload, {
+      id: c.req.header('svix-id'),
+      timestamp: c.req.header('svix-timestamp'),
+      signature: c.req.header('svix-signature'),
+    }, secret);
+    if (!verified) {
+      return c.json({ error: 'Invalid webhook signature' }, 400);
+    }
   }
 
   // --- Parse payload ---
   let payload: any;
   try {
-    payload = await c.req.json();
+    payload = JSON.parse(rawPayload);
   } catch {
     return c.json({ error: 'Invalid JSON payload' }, 400);
   }
