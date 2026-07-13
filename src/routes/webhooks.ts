@@ -22,9 +22,8 @@ export const webhookRouter = new Hono<{ Bindings: Env }>();
  * `svix-id`, `svix-timestamp`, and `svix-signature`. We verify the
  * HMAC-SHA256 signature using the RESEND_WEBHOOK_SECRET env var.
  *
- * If the secret is not configured, we log a warning and accept
- * the payload (useful for testing). In production, ALWAYS set
- * RESEND_WEBHOOK_SECRET.
+ * Requests are rejected if the secret is not configured or the signature
+ * is invalid or stale (timestamp outside a 5-minute window).
  */
 function base64Decode(input: string): Uint8Array {
   const binary = atob(input);
@@ -43,9 +42,21 @@ async function verifySvixWebhook(
   if (!secret.startsWith('whsec_')) {
     return false;
   }
+  const id = headers.id;
   const timestamp = headers.timestamp;
   const signature = headers.signature;
-  if (!timestamp || !signature) {
+  if (!id || !timestamp || !signature) {
+    return false;
+  }
+
+  const timestampNum = parseInt(timestamp, 10);
+  if (Number.isNaN(timestampNum)) {
+    return false;
+  }
+
+  // Reject old or future timestamps (5-minute window)
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestampNum) > 300) {
     return false;
   }
 
@@ -58,7 +69,8 @@ async function verifySvixWebhook(
     ['verify']
   );
 
-  const message = new TextEncoder().encode(`${timestamp}.${payload}`);
+  // Svix signs: id.timestamp.payload
+  const message = new TextEncoder().encode(`${id}.${timestamp}.${payload}`);
   const signatures = signature.split(' ').filter(Boolean);
 
   for (const sig of signatures) {
@@ -92,16 +104,16 @@ webhookRouter.post('/resend', async (c) => {
   const rawPayload = await c.req.text();
 
   if (!secret) {
-    console.warn('RESEND_WEBHOOK_SECRET not configured — accepting webhook without signature verification');
-  } else {
-    const verified = await verifySvixWebhook(rawPayload, {
-      id: c.req.header('svix-id'),
-      timestamp: c.req.header('svix-timestamp'),
-      signature: c.req.header('svix-signature'),
-    }, secret);
-    if (!verified) {
-      return c.json({ error: 'Invalid webhook signature' }, 400);
-    }
+    return c.json({ error: 'Webhook secret not configured' }, 500);
+  }
+
+  const verified = await verifySvixWebhook(rawPayload, {
+    id: c.req.header('svix-id'),
+    timestamp: c.req.header('svix-timestamp'),
+    signature: c.req.header('svix-signature'),
+  }, secret);
+  if (!verified) {
+    return c.json({ error: 'Invalid webhook signature' }, 400);
   }
 
   // --- Parse payload ---

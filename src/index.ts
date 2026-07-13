@@ -17,9 +17,16 @@ export type Env = {
 const app = new Hono<{ Bindings: Env }>();
 
 app.use('*', async (c, next) => {
-  const origins = c.env.ALLOWED_ORIGINS?.split(',') || ['*'];
+  const rawOrigins = c.env.ALLOWED_ORIGINS?.split(',').map(o => o.trim()).filter(Boolean) || [];
+  if (rawOrigins.length === 0 || rawOrigins.includes('*')) {
+    return c.json({ error: 'CORS misconfigured' }, 500);
+  }
+
   const corsMiddleware = cors({
-    origin: origins,
+    origin: (origin) => {
+      if (!origin) return undefined;
+      return rawOrigins.includes(origin) ? origin : undefined;
+    },
     allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowHeaders: ['Content-Type', 'Authorization'],
     credentials: true,

@@ -710,7 +710,7 @@ publicRouter.get('/admin/ndaa-tokens', async (c) => {
   }
 
   const result = await c.env.DB.prepare(
-    'SELECT id, token, client_name, contact_email, active, created_at FROM ndaa_client_tokens ORDER BY created_at DESC'
+    'SELECT id, client_name, contact_email, active, created_at FROM ndaa_client_tokens ORDER BY created_at DESC'
   ).all();
 
   return c.json({ success: true, tokens: result.results || [] });
